@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Marvin Amzehnhoff", email = "ma.amzehnhoff@gmail.com"}
 ]
 keywords = ["smb", "acl", "windows", "ldap", "permissions", "security"]
 
@@ -27,9 +27,6 @@ dev = [
     "flake8>=6.0.0",
     "mypy>=1.0.0",
 ]
-
-[project.scripts]
-smb-acl-scan = "smb_acl_scanner.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/smb-acl-scanner"
