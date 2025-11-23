@@ -26,10 +26,10 @@ class SecurityInfo:
     Backup = 0x00010000
 
 
-class SMBACLReader:
+class SMBACLReader(WellKnownSIDs):
     """Klasse zum Auslesen von Windows ACLs über SMB"""
     
-    def __init__(self, username, password, domain="", auth_protocol="ntlm"):
+    def __init__(self, username, password, domain="", auth_protocol="ntlm", further_well_known_sids=None):
         """
         Initialisiert den ACL Reader
         
@@ -37,7 +37,12 @@ class SMBACLReader:
             username: SMB Benutzername
             password: SMB Passwort
             domain: Domain (optional)
+            auth_protocol: Authentifizierungsprotokoll (default: ntlm)
+            further_well_known_sids: Weitere well-known SIDs (optional)
         """
+        # Basisklasse initialisieren
+        super().__init__(additional_well_known_sids=further_well_known_sids)
+        
         # SMB Client konfigurieren
         smbclient.ClientConfig(
             username=username,
@@ -441,7 +446,7 @@ class SMBACLReader:
         
         return permissions
     
-    def scan_acl_changes(self, base_path, max_depth=None):
+    def scan_acl_changes(self, base_path, max_depth=None, skip_well_known=False):
         """
         Scannt ein Laufwerk und gibt nur Ordner zurück, bei denen sich die ACLs ändern.
         Dies ist sehr effizient, da nur Ordner mit tatsächlichen ACL-Änderungen erfasst werden.
@@ -463,6 +468,10 @@ class SMBACLReader:
             base_sd = self.get_security_descriptor(base_path, 'dir')
             base_sec_info = self.parse_security_descriptor(base_sd)
             
+            # Well-known SIDs filtern wenn gewünscht (VOR dem yield!)
+            if skip_well_known:
+                base_sec_info = self.filter_well_known_from_security_info(base_sec_info)
+            
             yield {
                 'path': base_path,
                 'depth': 0,
@@ -471,12 +480,13 @@ class SMBACLReader:
                 'acl_changed': True
             }
             
-            # Rekursiv scannen
+            # Rekursiv scannen (skip_well_known weitergeben)
             yield from self._scan_acl_changes_recursive(
                 base_path, 
                 base_sec_info, 
                 1, 
-                max_depth
+                max_depth,
+                skip_well_known
             )
             
         except Exception as e:
@@ -488,7 +498,7 @@ class SMBACLReader:
                 'acl_changed': False
             }
     
-    def _scan_acl_changes_recursive(self, path, parent_security, current_depth, max_depth):
+    def _scan_acl_changes_recursive(self, path, parent_security, current_depth, max_depth, skip_well_known=False):
         """
         Interne rekursive Methode für scan_acl_changes
         
@@ -521,6 +531,10 @@ class SMBACLReader:
                 sd = self.get_security_descriptor(full_path, 'dir')
                 sec_info = self.parse_security_descriptor(sd)
                 
+                # Well-known SIDs filtern wenn gewünscht
+                if skip_well_known:
+                    sec_info = self.filter_well_known_from_security_info(sec_info)
+                
                 # ACLs vergleichen
                 acl_changed = not self._compare_acls(parent_security, sec_info)
                 acl_inherited = not acl_changed
@@ -540,7 +554,8 @@ class SMBACLReader:
                         full_path,
                         sec_info,
                         current_depth + 1,
-                        max_depth
+                        max_depth,
+                        skip_well_known
                     )
                 else:
                     # ACL ist identisch, aber trotzdem rekursiv weitermachen
@@ -549,7 +564,8 @@ class SMBACLReader:
                         full_path,
                         parent_security,  # Weiterhin die Parent-ACL verwenden
                         current_depth + 1,
-                        max_depth
+                        max_depth,
+                        skip_well_known
                     )
                     
             except Exception as e:
