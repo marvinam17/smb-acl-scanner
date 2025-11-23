@@ -588,11 +588,6 @@ class SMBACLReader(WellKnownSIDs):
         Returns:
             True wenn die ACLs identisch sind, False sonst
         """
-        # Owner und Group vergleichen
-        if security1.get('owner') != security2.get('owner'):
-            return False
-        if security1.get('group') != security2.get('group'):
-            return False
         
         # DACL vergleichen
         dacl1 = security1.get('dacl', [])
