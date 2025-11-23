@@ -12,7 +12,6 @@ from smbprotocol.open import (
     SMB2QueryInfoResponse,
 )
 from smbprotocol.security_descriptor import SMB2CreateSDBuffer
-from .well_known_sids import WellKnownSIDs
 
 
 class SecurityInfo:
@@ -27,10 +26,10 @@ class SecurityInfo:
     Backup = 0x00010000
 
 
-class SMBACLReader(WellKnownSIDs):
+class SMBACLReader:
     """Klasse zum Auslesen von Windows ACLs über SMB"""
     
-    def __init__(self, username, password, domain="", auth_protocol="ntlm", further_well_known_sids=None):
+    def __init__(self, username, password, domain="", auth_protocol="ntlm"):
         """
         Initialisiert den ACL Reader
         
@@ -38,9 +37,7 @@ class SMBACLReader(WellKnownSIDs):
             username: SMB Benutzername
             password: SMB Passwort
             domain: Domain (optional)
-            further_well_known_sids: Weitere well-known SIDs (optional)
         """
-        super().__init__(additional_well_known_sids=further_well_known_sids)
         # SMB Client konfigurieren
         smbclient.ClientConfig(
             username=username,
@@ -343,7 +340,52 @@ class SMBACLReader(WellKnownSIDs):
         except Exception as e:
             print(f"Warnung: SACL konnte nicht geparst werden: {e}")
         
+        # Merge doppelte SIDs in DACL
+        result = self.merge_duplicate_sids(result)
+        
         return result
+    
+    def merge_duplicate_sids(self, security_info):
+        """
+        Merged doppelte SIDs in der DACL mit verschiedenen Berechtigungen
+        Kombiniert ACEs mit derselben SID durch OR-Verknüpfung der Masken
+        
+        Args:
+            security_info: Security-Info Dictionary
+            
+        Returns:
+            Security-Info Dictionary mit gemergten SIDs
+        """
+        if 'dacl' not in security_info or not security_info['dacl']:
+            return security_info
+        
+        # Gruppiere ACEs nach SID
+        sid_groups = {}
+        for ace in security_info['dacl']:
+            sid = ace['sid']
+            if sid not in sid_groups:
+                sid_groups[sid] = []
+            sid_groups[sid].append(ace)
+        
+        # Merge ACEs mit derselben SID
+        merged_dacl = []
+        for sid, aces in sid_groups.items():
+            if len(aces) == 1:
+                # Keine Duplikate
+                merged_dacl.append(aces[0])
+            else:
+                # Merge: kombiniere masks mit OR
+                merged_ace = aces[0].copy()
+                combined_mask = aces[0]['mask']
+                for ace in aces[1:]:
+                    combined_mask |= ace['mask']
+                
+                merged_ace['mask'] = combined_mask
+                merged_ace['permissions'] = self._mask_to_permissions(combined_mask)
+                merged_dacl.append(merged_ace)
+        
+        security_info['dacl'] = merged_dacl
+        return security_info
     
     def _mask_to_permissions(self, mask):
         """
@@ -399,7 +441,7 @@ class SMBACLReader(WellKnownSIDs):
         
         return permissions
     
-    def scan_acl_changes(self, base_path, max_depth=None, skip_well_known=False):
+    def scan_acl_changes(self, base_path, max_depth=None):
         """
         Scannt ein Laufwerk und gibt nur Ordner zurück, bei denen sich die ACLs ändern.
         Dies ist sehr effizient, da nur Ordner mit tatsächlichen ACL-Änderungen erfasst werden.
@@ -421,10 +463,6 @@ class SMBACLReader(WellKnownSIDs):
             base_sd = self.get_security_descriptor(base_path, 'dir')
             base_sec_info = self.parse_security_descriptor(base_sd)
             
-            # Well-known SIDs filtern wenn gewünscht (VOR dem yield!)
-            if skip_well_known:
-                base_sec_info = self.filter_well_known_from_security_info(base_sec_info)
-            
             yield {
                 'path': base_path,
                 'depth': 0,
@@ -433,13 +471,12 @@ class SMBACLReader(WellKnownSIDs):
                 'acl_changed': True
             }
             
-            # Rekursiv scannen (skip_well_known weitergeben)
+            # Rekursiv scannen
             yield from self._scan_acl_changes_recursive(
                 base_path, 
                 base_sec_info, 
                 1, 
-                max_depth,
-                skip_well_known
+                max_depth
             )
             
         except Exception as e:
@@ -451,7 +488,7 @@ class SMBACLReader(WellKnownSIDs):
                 'acl_changed': False
             }
     
-    def _scan_acl_changes_recursive(self, path, parent_security, current_depth, max_depth, skip_well_known=False):
+    def _scan_acl_changes_recursive(self, path, parent_security, current_depth, max_depth):
         """
         Interne rekursive Methode für scan_acl_changes
         
@@ -484,10 +521,6 @@ class SMBACLReader(WellKnownSIDs):
                 sd = self.get_security_descriptor(full_path, 'dir')
                 sec_info = self.parse_security_descriptor(sd)
                 
-                # Well-known SIDs filtern wenn gewünscht
-                if skip_well_known:
-                    sec_info = self.filter_well_known_from_security_info(sec_info)
-                
                 # ACLs vergleichen
                 acl_changed = not self._compare_acls(parent_security, sec_info)
                 acl_inherited = not acl_changed
@@ -507,8 +540,7 @@ class SMBACLReader(WellKnownSIDs):
                         full_path,
                         sec_info,
                         current_depth + 1,
-                        max_depth,
-                        skip_well_known
+                        max_depth
                     )
                 else:
                     # ACL ist identisch, aber trotzdem rekursiv weitermachen
@@ -517,8 +549,7 @@ class SMBACLReader(WellKnownSIDs):
                         full_path,
                         parent_security,  # Weiterhin die Parent-ACL verwenden
                         current_depth + 1,
-                        max_depth,
-                        skip_well_known
+                        max_depth
                     )
                     
             except Exception as e:
@@ -542,12 +573,6 @@ class SMBACLReader(WellKnownSIDs):
         Returns:
             True wenn die ACLs identisch sind, False sonst
         """
-        # Owner und Group vergleichen
-        if security1.get('owner') != security2.get('owner'):
-            return False
-        if security1.get('group') != security2.get('group'):
-            return False
-        
         # DACL vergleichen
         dacl1 = security1.get('dacl', [])
         dacl2 = security2.get('dacl', [])
