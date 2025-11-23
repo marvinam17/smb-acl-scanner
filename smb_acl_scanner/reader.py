@@ -342,7 +342,52 @@ class SMBACLReader(WellKnownSIDs):
         except Exception as e:
             print(f"Warnung: SACL konnte nicht geparst werden: {e}")
         
+        # Merge doppelte SIDs in DACL
+        result = self.merge_duplicate_sids(result)
+        
         return result
+    
+    def merge_duplicate_sids(self, security_info):
+        """
+        Merged doppelte SIDs in der DACL mit verschiedenen Berechtigungen
+        Kombiniert ACEs mit derselben SID durch OR-Verknüpfung der Masken
+        
+        Args:
+            security_info: Security-Info Dictionary
+            
+        Returns:
+            Security-Info Dictionary mit gemergten SIDs
+        """
+        if 'dacl' not in security_info or not security_info['dacl']:
+            return security_info
+        
+        # Gruppiere ACEs nach SID
+        sid_groups = {}
+        for ace in security_info['dacl']:
+            sid = ace['sid']
+            if sid not in sid_groups:
+                sid_groups[sid] = []
+            sid_groups[sid].append(ace)
+        
+        # Merge ACEs mit derselben SID
+        merged_dacl = []
+        for sid, aces in sid_groups.items():
+            if len(aces) == 1:
+                # Keine Duplikate
+                merged_dacl.append(aces[0])
+            else:
+                # Merge: kombiniere masks mit OR
+                merged_ace = aces[0].copy()
+                combined_mask = aces[0]['mask']
+                for ace in aces[1:]:
+                    combined_mask |= ace['mask']
+                
+                merged_ace['mask'] = combined_mask
+                merged_ace['permissions'] = self._mask_to_permissions(combined_mask)
+                merged_dacl.append(merged_ace)
+        
+        security_info['dacl'] = merged_dacl
+        return security_info
     
     def _mask_to_permissions(self, mask):
         """
