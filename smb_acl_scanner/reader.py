@@ -40,6 +40,8 @@ class SMBACLReader(WellKnownSIDs):
             password: SMB Passwort
             domain: Domain (optional)
         """
+        super().__init__(additional_well_known_sids=further_well_known_sids)
+
         # SMB Client konfigurieren
         smbclient.ClientConfig(
             username=username,
