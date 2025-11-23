@@ -395,3 +395,163 @@ class SMBACLReader:
             permissions.append('GENERIC_READ')
         
         return permissions
+    
+    def scan_acl_changes(self, base_path, max_depth=None):
+        """
+        Scannt ein Laufwerk und gibt nur Ordner zurück, bei denen sich die ACLs ändern.
+        Dies ist sehr effizient, da nur Ordner mit tatsächlichen ACL-Änderungen erfasst werden.
+        
+        Args:
+            base_path: UNC-Pfad zum Basis-Verzeichnis (z.B. \\\\server\\share)
+            max_depth: Maximale Tiefe (None = unbegrenzt)
+            
+        Returns:
+            Generator der Dictionaries mit 'path', 'depth', 'security', 'acl_inherited' Informationen
+            
+        Beispiel:
+            reader = SMBACLReader("user", "pass", "DOMAIN")
+            for item in reader.scan_acl_changes("\\\\server\\share"):
+                print(f"{item['path']}: ACL geändert (inherited={item['acl_inherited']})")
+        """
+        # Basis-Ordner immer zurückgeben
+        try:
+            base_sd = self.get_security_descriptor(base_path, 'dir')
+            base_sec_info = self.parse_security_descriptor(base_sd)
+            
+            yield {
+                'path': base_path,
+                'depth': 0,
+                'security': base_sec_info,
+                'acl_inherited': False,
+                'acl_changed': True
+            }
+            
+            # Rekursiv scannen
+            yield from self._scan_acl_changes_recursive(
+                base_path, 
+                base_sec_info, 
+                1, 
+                max_depth
+            )
+            
+        except Exception as e:
+            yield {
+                'path': base_path,
+                'depth': 0,
+                'error': str(e),
+                'acl_inherited': False,
+                'acl_changed': False
+            }
+    
+    def _scan_acl_changes_recursive(self, path, parent_security, current_depth, max_depth):
+        """
+        Interne rekursive Methode für scan_acl_changes
+        
+        Args:
+            path: Aktueller Pfad
+            parent_security: Security-Info des übergeordneten Ordners
+            current_depth: Aktuelle Tiefe
+            max_depth: Maximale Tiefe
+        """
+        # Maximale Tiefe erreicht?
+        if max_depth is not None and current_depth > max_depth:
+            return
+        
+        # Verzeichnisinhalt auflisten
+        try:
+            entries = smbclient.scandir(path)
+        except Exception as e:
+            print(f"Fehler beim Scannen von {path}: {e}")
+            return
+        
+        for entry in entries:
+            # Nur Verzeichnisse verarbeiten
+            if not entry.is_dir():
+                continue
+            
+            full_path = f"{path}\\{entry.name}"
+            
+            try:
+                # Security Descriptor des aktuellen Ordners abrufen
+                sd = self.get_security_descriptor(full_path, 'dir')
+                sec_info = self.parse_security_descriptor(sd)
+                
+                # ACLs vergleichen
+                acl_changed = not self._compare_acls(parent_security, sec_info)
+                acl_inherited = not acl_changed
+                
+                # Nur zurückgeben, wenn sich ACL geändert hat
+                if acl_changed:
+                    yield {
+                        'path': full_path,
+                        'depth': current_depth,
+                        'security': sec_info,
+                        'acl_inherited': acl_inherited,
+                        'acl_changed': acl_changed
+                    }
+                    
+                    # Rekursiv weitermachen mit der neuen ACL als Referenz
+                    yield from self._scan_acl_changes_recursive(
+                        full_path,
+                        sec_info,
+                        current_depth + 1,
+                        max_depth
+                    )
+                else:
+                    # ACL ist identisch, aber trotzdem rekursiv weitermachen
+                    # um Änderungen in tieferen Ebenen zu finden
+                    yield from self._scan_acl_changes_recursive(
+                        full_path,
+                        parent_security,  # Weiterhin die Parent-ACL verwenden
+                        current_depth + 1,
+                        max_depth
+                    )
+                    
+            except Exception as e:
+                # Fehler protokollieren, aber weitermachen
+                yield {
+                    'path': full_path,
+                    'depth': current_depth,
+                    'error': str(e),
+                    'acl_inherited': False,
+                    'acl_changed': False
+                }
+    
+    def _compare_acls(self, security1, security2):
+        """
+        Vergleicht zwei Security-Descriptors auf Gleichheit der DACLs
+        
+        Args:
+            security1: Erstes Security-Info Dictionary
+            security2: Zweites Security-Info Dictionary
+            
+        Returns:
+            True wenn die ACLs identisch sind, False sonst
+        """
+        # Owner und Group vergleichen
+        if security1.get('owner') != security2.get('owner'):
+            return False
+        if security1.get('group') != security2.get('group'):
+            return False
+        
+        # DACL vergleichen
+        dacl1 = security1.get('dacl', [])
+        dacl2 = security2.get('dacl', [])
+        
+        # Anzahl der ACEs muss gleich sein
+        if len(dacl1) != len(dacl2):
+            return False
+        
+        # Jedes ACE vergleichen
+        for ace1, ace2 in zip(dacl1, dacl2):
+            # Typ, SID und Mask müssen übereinstimmen
+            if ace1.get('type') != ace2.get('type'):
+                return False
+            if ace1.get('sid') != ace2.get('sid'):
+                return False
+            if ace1.get('mask') != ace2.get('mask'):
+                return False
+            if ace1.get('flags') != ace2.get('flags'):
+                return False
+        
+        return True
