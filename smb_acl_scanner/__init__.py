@@ -6,9 +6,11 @@ __email__ = "ma.amzehnhoff@gmail.com"
 
 from .reader import SMBACLReader, SecurityInfo
 from .resolver import LDAPResolver
+from .well_known_sids import WellKnownSIDs
 
 __all__ = [
     "SMBACLReader",
     "SecurityInfo",
     "LDAPResolver",
+    "WellKnownSIDs",
 ]
